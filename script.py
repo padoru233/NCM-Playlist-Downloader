@@ -11,12 +11,9 @@ try:
     from colorama import init, Fore, Back, Style # type: ignore
     init(autoreset=False)
     COLORAMA_INSTALLED = True
-except ImportError:
+except ImportError as e:
+    if DEBUG: print(e)
     COLORAMA_INSTALLED = False
-    if platform.system() == 'Windows':
-        os.system('pip install colorama')
-if platform.system() == 'Windows':
-    os.system('')
 import mutagen # pyright: ignore[reportMissingImports]
 from mutagen.id3 import ID3, APIC, TIT2, TPE1, TALB, TRCK, TDRC # pyright: ignore[reportMissingImports]
 from mutagen.flac import FLAC, Picture # pyright: ignore[reportMissingImports]
@@ -25,6 +22,59 @@ from PIL import Image # pyright: ignore[reportMissingImports]
 from io import BytesIO
 MUTAGEN_INSTALLED = True
 USER_INFO_CACHE = {'nickname': None, 'user_id': None, 'vip': None}
+
+
+def send_notification(title: str, message: str, timeout: int = 5):
+    """发通知"""
+    with suppress(Exception):
+        from plyer import notification  # type: ignore
+        with suppress(Exception):
+            notification.notify(title=title, message=message, app_name='NCM-Playlist-Downloader', timeout=timeout)
+            return
+    system = platform.system()
+    with suppress(Exception):
+        if system == 'Darwin':
+            # 使用 AppleScript 显示通知
+            safe_title = title.replace('"', '\\"')
+            safe_msg = message.replace('"', '\\"')
+            subprocess.run(['osascript', '-e', f'display notification "{safe_msg}" with title "{safe_title}"'], check=False)
+            return
+        elif system == 'Linux':
+            if shutil.which('notify-send'):
+                subprocess.run(['notify-send', title, message], check=False)
+                return
+            elif shutil.which('zenity'):
+                subprocess.run(['zenity', '--notification', '--text', message, '--title', title], check=False)
+                return
+            elif shutil.which('kdialog'):
+                subprocess.run(['kdialog', '--passivepopup', message, str(timeout), '--title', title], check=False)
+                return
+            elif shutil.which('termux-notification'):
+                subprocess.run(['termux-notification', '--title', title, '--content', message], check=False)
+                return
+        elif system == 'Windows':
+            # Avoid using backslashes inside f-string expressions (Python 3.8 limitation).
+            # Precompute escaped title/message, then use simple variable expressions in the f-string.
+            safe_title = title.replace('"', '\\"')
+            safe_msg = message.replace('"', '\\"')
+            ps = f"""
+$title = \"{safe_title}\"
+$text = \"{safe_msg}\"
+[reflection.assembly]::loadwithpartialname('System.Windows.Forms') | Out-Null
+[reflection.assembly]::loadwithpartialname('System.Drawing') | Out-Null
+$n = New-Object System.Windows.Forms.NotifyIcon
+$n.Icon = [System.Drawing.SystemIcons]::Information
+$n.BalloonTipTitle = $title
+$n.BalloonTipText = $text
+$n.Visible = $true
+$n.ShowBalloonTip({int(timeout * 1000)})
+Start-Sleep -Seconds {max(1, int(timeout))}
+$n.Dispose()
+"""
+            with suppress(Exception):
+                subprocess.Popen(['powershell', '-NoProfile', '-Command', ps], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return
+
 
 def get_clipboard_text():
     """优先尝试 pyperclip，再降级到平台命令获取剪贴板内容，失败返回空字符串。"""
@@ -123,28 +173,81 @@ def get_qrcode():
     """
     try:
         print('\n  请选择登录方式：')
-        print('  \x1b[36m[1]\x1b[0m \x1b[9mpyncm 直接扫码登录\x1b[0m \t\x1b[2m上游接口已失效，无法使用\x1b[0m')
-        print('  \x1b[36m[2]\x1b[0m \x1b[1m打开浏览器扫码登录\x1b[0m \t\x1b[2m适用于桌面设备，需要外部浏览器（推荐）\x1b[0m')
+        print('  \x1b[36m[1]\x1b[0m \x1b[1mpyncm 直接扫码登录\x1b[0m \t\x1b[2m手机端扫描二维码登录\x1b[0m')
+        print('  \x1b[36m[2]\x1b[0m 打开浏览器扫码登录\x1b[0m \t\x1b[2m适用于桌面设备，需要外部浏览器\x1b[0m')
         print('  \x1b[36m[3]\x1b[0m 手机短信/账号密码登录 \t\x1b[2m本地终端实现\x1b[0m')
         print('  \x1b[36m[4]\x1b[0m 手动导入 Cookie 登录 \t\x1b[2m直接粘贴 MUSIC_U 等 cookie 字串\x1b[0m')
         print('  \x1b[36m[5]\x1b[0m 匿名登录 \t\t\t\x1b[2m创建随机凭据，不推荐\x1b[0m')
-        choice = input('  请选择 (默认 2)\x1b[36m > \x1b[0m').strip() or '2'
+        gm_cookie_path = None
+        try:
+            candidates = []
+            mf_root = os.environ.get('MUSICFOX_ROOT')
+            if mf_root:
+                candidates.append(os.path.join(mf_root, 'cookie'))
+
+            system = platform.system()
+            home = os.path.expanduser('~')
+            if DEBUG: print(f'system: {system}, home: {home}')
+            if system == 'Darwin':
+                candidates.append(os.path.join(home, 'Library', 'Application Support', 'go-musicfox', 'cookie'))
+                candidates.append(os.path.join(home, '.go-musicfox', 'cookie'))
+            elif system == 'Linux':
+                xdg = os.environ.get('XDG_CONFIG_HOME')
+                if xdg:
+                    candidates.append(os.path.join(xdg, 'go-musicfox', 'cookie'))
+                candidates.append(os.path.join(home, '.local', 'share', 'go-musicfox', 'cookie'))
+                candidates.append(os.path.join(home, '.go-musicfox', 'cookie'))
+            elif system == 'Windows':
+                appdata = os.environ.get('APPDATA')
+                if appdata:
+                    candidates.append(os.path.join(appdata, 'go-musicfox', 'cookie'))
+                local_appdata = os.environ.get('LOCALAPPDATA')
+                if local_appdata:
+                    candidates.append(os.path.join(local_appdata, 'go-musicfox', 'cookie'))
+                userprofile = os.environ.get('USERPROFILE') or home
+                candidates.append(os.path.join(userprofile, '.go-musicfox', 'cookie'))
+            else:
+                xdg = os.environ.get('XDG_CONFIG_HOME')
+                if xdg:
+                    candidates.append(os.path.join(xdg, 'go-musicfox', 'cookie'))
+                candidates.append(os.path.join(home, '.local', 'share', 'go-musicfox', 'cookie'))
+                candidates.append(os.path.join(home, '.go-musicfox', 'cookie'))
+
+            if system == 'Windows' and not os.environ.get('LOCALAPPDATA'):
+                local_guess = os.path.join(home, 'AppData', 'Local', 'go-musicfox', 'cookie')
+                candidates.append(local_guess)
+
+            for p in candidates:
+                with suppress(Exception):
+                    if DEBUG: print(p)
+                    if p and os.path.exists(p):
+                        gm_cookie_path = p
+                        if DEBUG: print(f'SUCCESS: added entry(see below) gm_cookie_path:{gm_cookie_path}, ')
+                        break
+                    if DEBUG: print("^"*len(p) + " -> NOT EXIST")
+        except Exception:
+            gm_cookie_path = None
+        gm_exists = bool(gm_cookie_path and os.path.exists(gm_cookie_path))
+        if gm_exists:
+            print(f"  \x1b[32m[6]\x1b[0m 通过 go-musicfox 登录\t\x1b[2m您已在 musicfox 中登录，可直接使用\x1b[0m")
+        choice = input('  请选择 (默认 1)\x1b[36m > \x1b[0m').strip() or '1'
         if choice == '1':
             try:
-                print('\x1b[33m! 使用 pyncm 直接扫码登录已确认因接口过时封堵，您仍要尝试吗？\x1b[0m')
-                print('  [0] 取消  [9] 继续')
-                confirm = input('  请输入您的选择 > ').strip()
-                if confirm == '9':
-                    print('\x1b[33m! 正在尝试 pyncm 直接扫码登录...\x1b[0m')
-                else:
-                    print('\x1b[31m× 已取消 pyncm 直接扫码登录。\x1b[0m')
-                    return get_qrcode()
+                # print('\x1b[33m! 使用 pyncm 直接扫码登录已确认因接口过时封堵，您仍要尝试吗？\x1b[0m')
+                # print('  [0] 取消  [9] 继续')
+                # confirm = input('  请输入您的选择 > ').strip()
+                # if confirm == '9':
+                #     print('\x1b[33m! 正在尝试 pyncm 直接扫码登录...\x1b[0m')
+                # else:
+                #     print('\x1b[31m× 已取消 pyncm 直接扫码登录。\x1b[0m')
+                #     return get_qrcode()
                 uuid_rsp = login.LoginQrcodeUnikey()
                 uuid = uuid_rsp.get('unikey') if isinstance(uuid_rsp, dict) else None
                 if not uuid:
                     print('\x1b[31m× 无法获取二维码unikey\x1b[0m\x1b[K')
                     return get_qrcode()
-                url = f'https://music.163.com/login?codekey={uuid}'
+                # url = f'https://music.163.com/login?codekey={uuid}'
+                url = login.GetLoginQRCodeUrl(uuid)
                 img = qrcode.make(url)
                 img_path = 'ncm.png'
                 img.save(img_path) # pyright: ignore[reportArgumentType]
@@ -153,6 +256,7 @@ def get_qrcode():
                     open_image(img_path)
                 except Exception as e:
                     print(f'{e}，请手动打开 ncm.png 文件进行扫码登录')
+                __802_displayed = False
                 max_polls = 180
                 for attempt in range(max_polls):
                     try:
@@ -169,13 +273,16 @@ def get_qrcode():
                                 display_user_info(session)
                             return session
                         elif code == 8821:
-                            print('\x1b[33m! 接口已失效(8821)\x1b[0m\x1b[K')
+                            print('\x1b[33m! 接口风控(8821)\x1b[0m\x1b[K')
                             raise RuntimeError('登录二维码接口已失效')
                         elif code == 800:
                             print('  二维码已过期，请重新尝试。')
                             break
                         elif code == 802:
-                            print(f'\x1b[33m  用户扫码成功，请在手机端确认登录。\x1b[0m\x1b[K')
+                            if not __802_displayed:
+                                send_notification('扫码登录', '扫码成功，请在手机端确认登录。')
+                                print(f'\x1b[33m  用户扫码成功，请在手机端确认登录。\x1b[0m\x1b[K')
+                                __802_displayed = True
                         elif code != 801:
                             msg = rsp.get('message') if isinstance(rsp, dict) else None
                             print(f'\x1b[31m× 二维码检查失败，出现未知错误: {msg}\x1b[0m\x1b[K')
@@ -226,9 +333,13 @@ def get_qrcode():
                 if m == '2':
                     try:
                         import getpass
-                        password = getpass.getpass('  输入密码: ')
-                    except Exception:
-                        password = input('  输入密码: ')
+                        try:
+                            password = getpass.getpass('  输入密码 > ', echo_char='*')
+                        except TypeError:
+                            password = getpass.getpass('  输入密码 > ')
+                    except Exception as e:
+                        if DEBUG: print(e.__class__, e)
+                        password = input('  输入密码 > ')
                     rsp = login.LoginViaCellphone(phone, password=password, ctcode=ctcode)
                     code = rsp.get('code') if isinstance(rsp, dict) else None
                     if code == 200:
@@ -305,6 +416,90 @@ def get_qrcode():
                     return get_qrcode()
             except Exception as e:
                 print(f'\x1b[31m× 匿名登录出错: {e}\x1b[0m')
+                return get_qrcode()
+        elif choice == '6':
+            # 读取并导入 %LOCALAPPDATA%\go-musicfox\cookie（Netscape 格式）
+            if not gm_exists:
+                print('\x1b[33m! 无效选择。\x1b[0m')
+                return get_qrcode()
+            print('\x1b[33m! 正在从 go-musicfox 获取登录状态...\x1b[0m')
+            try:
+                cookies = []  # 每项: {domain, path, name, value}
+                with open(gm_cookie_path, 'r', encoding='utf-8', errors='ignore') as fh:
+                    for raw in fh:
+                        line = raw.strip()
+                        if not line:
+                            continue
+                        # 以制表符为主进行切分，不足则尝试任意空白
+                        parts = line.split('\t') if ('\t' in line) else line.split()
+                        if len(parts) < 7:
+                            continue
+                        domain = parts[0]
+                        if domain.startswith('#HttpOnly_') or domain.startswith('#httponly_'):
+                            domain = domain.split('_', 1)[1]
+                        if domain.startswith('#'):
+                            # 注释行
+                            continue
+                        path = parts[2]
+                        name = parts[5]
+                        value = parts[6]
+                        if not name:
+                            continue
+                        cookies.append({'domain': domain, 'path': path or '/', 'name': name, 'value': value})
+                if not cookies:
+                    print('\x1b[31m× 未能从 go-musicfox Cookie 文件解析到任何条目。\x1b[0m')
+                    return get_qrcode()
+                # 构建/获取会话并注入 cookie
+                try:
+                    s = pyncm.GetCurrentSession()
+                except Exception as e:
+                    if DEBUG: print(e)
+                    s = None
+                if s is None:
+                    try:
+                        import requests as _rq
+                        s = _rq.Session()
+                    except Exception as e:
+                        if DEBUG: print(e)
+                        s = pyncm.GetCurrentSession()  # 尽力而为
+                # 设置通用头
+                ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Safari'
+                with suppress(Exception):
+                    s.headers.update({'User-Agent': ua, 'Referer': 'https://music.163.com/', 'Origin': 'https://music.163.com'})
+                # 注入 cookies
+                music_u_found = False
+                csrf_val = None
+                for c in cookies:
+                    name = c['name']
+                    value = c['value']
+                    domain = c['domain'] or '.music.163.com'
+                    path = c['path'] or '/'
+                    with suppress(Exception):
+                        s.cookies.set(name, value, domain=domain, path=path)
+                    if name == 'MUSIC_U' and value:
+                        music_u_found = True
+                    if name in ('__csrf', 'csrf_token') and value:
+                        csrf_val = value
+                # 补写 csrf_token（requests 不会自动映射）
+                if csrf_val and (not s.cookies.get('csrf_token')):
+                    with suppress(Exception):
+                        s.cookies.set('csrf_token', csrf_val, domain='.music.163.com', path='/')
+                # 挂载为当前会话并写入缓存
+                with suppress(Exception):
+                    pyncm.SetCurrentSession(s)
+                with suppress(Exception):
+                    login.WriteLoginInfo(login.GetCurrentLoginStatus(), s)
+                print('\x1b[32m✓ go-musicfox 登录完成。\x1b[0m')
+                if not music_u_found:
+                    print('\x1b[33m! 警告：未检测到 MUSIC_U，登录流程实际失败！\x1b[0m')
+                with suppress(Exception):
+                    display_user_info(s)
+                return s
+            except FileNotFoundError:
+                print('\x1b[31m× 找不到 go-musicfox Cookie 文件。\x1b[0m')
+                return get_qrcode()
+            except Exception as e:
+                print(f'\x1b[31m× 导入 go-musicfox Cookie 失败: {e}\x1b[0m')
                 return get_qrcode()
         elif choice == '4':
             '\n            从剪贴板或手动粘贴 Cookie 登录（会解析 k=v; k2=v2 格式），并注入到 pyncm.Session\n            '
@@ -743,6 +938,8 @@ def parse_lrc(lrc_content):
             lyrics.append((time_seconds, text))
     return sorted(lyrics, key=lambda x: x[0])
 
+LYRIC_TRANSLATION_GAP = 0.01
+
 def merge_lyrics(original_lyrics, translated_lyrics, song_duration=None):
     if not translated_lyrics:
         return original_lyrics
@@ -751,13 +948,17 @@ def merge_lyrics(original_lyrics, translated_lyrics, song_duration=None):
     for i, (time, text) in enumerate(original_lyrics):
         merged.append((time, text))
         if time in trans_dict and trans_dict[time].strip():
-            if i + 1 >= len(original_lyrics) and song_duration:
-                trans_time = song_duration + 0.5
-            elif i + 1 < len(original_lyrics):
+            trans_time = time + LYRIC_TRANSLATION_GAP
+            if i + 1 < len(original_lyrics):
                 next_time = original_lyrics[i + 1][0]
-                trans_time = next_time - 0.01
+                latest_before_next = next_time - LYRIC_TRANSLATION_GAP
+                if latest_before_next >= trans_time:
+                    trans_time = latest_before_next
+                else:
+                    trans_time = max(time, latest_before_next)
             else:
-                trans_time = time + 0.5
+                tail_time = (song_duration + 0.5) if song_duration else (time + 0.5)
+                trans_time = max(trans_time, tail_time, time + LYRIC_TRANSLATION_GAP)
             merged.append((trans_time, trans_dict[time]))
     return sorted(merged, key=lambda x: x[0])
 
@@ -996,7 +1197,7 @@ def download_and_save_track(track_id, track_name, artist_name, level, download_p
                     digits = len(str(total)) if (index is not None and total is not None) else 0
                     idx_str = f"[{index:0{digits}d}/{total}] " if (index is not None and total is not None) else ''
                     # 预估基础行（用于是否采用新样式判断）
-                    base_core = f"100.0% {idx_str}正在下载:...   999.99MB/999.99MB 99999KB/s 9999s"
+                    base_core = f"100.0% {idx_str}正在下载:...   99.99MB/99.99MB 99999KB/s 9999s"
                     use_single_line = term_w >= 60 and len(base_core) <= term_w - 2  # 预留一点余量
                     downloaded = 0
                     last_downloaded = 0
@@ -1021,14 +1222,24 @@ def download_and_save_track(track_id, track_name, artist_name, level, download_p
                             m = int((eta % 3600) // 60)
                             return f'{h}h{m:02d}m'
 
-                    # 宽度计算工具：考虑中日韩全角字符宽度=2
-                    
+                    # 宽度计算工具：考虑中日韩全角字符宽度=2，并修正省略号“…”等特殊字符
 
                     def cell_width(ch: str) -> int:
                         if not ch:
                             return 0
+                        # 常见零宽字符（组合符号/格式控制）按0宽处理
+                        cat = unicodedata.category(ch)
+                        if cat in ('Mn', 'Me', 'Cf'):
+                            return 0
+                        # 单字符省略号在部分终端为宽字符，按2宽处理以避免对齐错位
+                        if ch == '…':
+                            return 2
                         eaw = unicodedata.east_asian_width(ch)
-                        return 2 if eaw in ('W', 'F') else 1
+                        if eaw in ('W', 'F'):
+                            return 2
+                        if eaw == 'A' and cat.startswith('S'):
+                            return 2
+                        return 1
 
                     def display_width(text: str) -> int:
                         return sum(cell_width(c) for c in text)
@@ -1095,14 +1306,22 @@ def download_and_save_track(track_id, track_name, artist_name, level, download_p
                                 except Exception:
                                     pass
                                 # 重新判断是否仍适合单行
-                                dynamic_base = f"{idx_str}正在下载:...... 100.0%  999.99MB/999.99MB 99999KB/s 9999s"
+                                dynamic_base = f"{idx_str}正在下载:... 100.0%  99.99MB/99.99MB 99999KB/s 9999s"
                                 if not (term_w >= 60 and display_width(dynamic_base) <= term_w - 2):
                                     # 切换到窄终端备用模式，确保稍后打印首行
                                     use_single_line = False
                                     # 立即打印首行（若尚未打印）
                                     if not fallback_header_printed:
+                                        # 在窄终端打印精简标题行，必要时对文件名进行截断
                                         progress_status = idx_str
-                                        print(f'\x1b[94m{progress_status}正在下载: {safe_filename}\x1b[0m')
+                                        try:
+                                            term_w, _ = get_terminal_size()
+                                        except Exception:
+                                            pass
+                                        prefix_plain = f"{progress_status}正在下载: "
+                                        max_name_w = max(0, term_w - display_width(prefix_plain) - 1)
+                                        disp_name = truncate_filename(safe_filename, max_name_w) if display_width(safe_filename) > max_name_w else safe_filename
+                                        print(f'\x1b[94m{progress_status}正在下载: {disp_name}\x1b[0m')
                                         fallback_header_printed = True
                                     continue
                                 # 百分比文本（不带前导0）
@@ -1175,7 +1394,14 @@ def download_and_save_track(track_id, track_name, artist_name, level, download_p
                                 # 旧窄终端备用方案：只打印一次标题行
                                 if not fallback_header_printed:
                                     progress_status = idx_str
-                                    print(f'\x1b[94m{progress_status}正在下载: {safe_filename}\x1b[0m')
+                                    try:
+                                        term_w, _ = get_terminal_size()
+                                    except Exception:
+                                        pass
+                                    prefix_plain = f"{progress_status}正在下载: "
+                                    max_name_w = max(0, term_w - display_width(prefix_plain) - 1)
+                                    disp_name = truncate_filename(safe_filename, max_name_w) if display_width(safe_filename) > max_name_w else safe_filename
+                                    print(f'\x1b[94m{progress_status}正在下载: {disp_name}\x1b[0m')
                                     fallback_header_printed = True
                                 # 不再实时输出进度，完成后输出成功信息
                         else:
@@ -1205,7 +1431,15 @@ def download_and_save_track(track_id, track_name, artist_name, level, download_p
                     sys.stdout.write('\r' + ' ' * term_w + '\r')
                 except Exception:
                     pass
-                print(f'\x1b[32m✓ 已下载: \x1b[0m{safe_filename}\x1b[K')
+                print(f'\x1b[32m✓ 已下载{progress_status}\x1b[0m{safe_filename}\x1b[K')
+                # try:
+                #     term_w, _ = get_terminal_size()
+                # except Exception:
+                #     pass
+                # prefix_plain = '✓ 已下载: '
+                # max_name_w = max(0, term_w - display_width(prefix_plain) - 1)
+                # disp_name = safe_filename if display_width(safe_filename) <= max_name_w else truncate_filename(safe_filename, max_name_w)
+                # print(f'\x1b[32m✓ 已下载: \x1b[0m{disp_name}\x1b[K')
             else:
                 # 旧样式成功信息
                 try:
@@ -1215,7 +1449,14 @@ def download_and_save_track(track_id, track_name, artist_name, level, download_p
                 except Exception:
                     pass
                 progress_status = f'[{index}/{total}] ' if (index is not None and total is not None) else ''
-                print(f'\x1b[32m✓ 已下载{progress_status}\x1b[0m{safe_filename}\x1b[K')
+                try:
+                    term_w, _ = get_terminal_size()
+                except Exception:
+                    pass
+                prefix_plain = f"✓ 已下载{progress_status}"
+                max_name_w = max(0, term_w - display_width(prefix_plain) - 1)
+                disp_name = safe_filename if display_width(safe_filename) <= max_name_w else truncate_filename(safe_filename, max_name_w)
+                print(f'\x1b[32m✓ 已下载{progress_status}\x1b[0m{disp_name}\x1b[K')
             try:
                 audio = MutagenFile(safe_filepath)
                 if audio is not None and hasattr(audio, 'info') and hasattr(audio.info, 'length'):
@@ -1349,6 +1590,7 @@ def display_user_info(session=None, silent=False):
         except Exception:
             vip_str = str(vip_val)
         if not silent:
+            send_notification('登录成功', f'欢迎，{nick}！')
             print(f'\x1b[32m✓ 已登录: \x1b[36m{nick}\x1b[0m (ID: {uid}) 状态: \x1b[33m{vip_str}\x1b[0m' if uid != '-' else f'\x1b[31m× 登录失败！\n  删除session.json后重新登录或反馈给开发者。\x1b[0m')
         USER_INFO_CACHE.update(info)
         return info
@@ -1358,10 +1600,12 @@ def display_user_info(session=None, silent=False):
         return {'nickname': None, 'user_id': None, 'vip': None}
     
 if __name__ == '__main__':
+    if 'DEBUG' not in globals() or not isinstance(DEBUG, bool):
+        DEBUG = False
     try:
         terminal_width, _ = get_terminal_size()
         if terminal_width >= 88:
-            print(" __. __. ____. . . . . . . .  ____. . ___. . \x1b[0m.\x1b[0m\x1b[0m \x1b[0m\x1b[0m.\x1b[0m\x1b[0m \x1b[0m\x1b[0m.\x1b[0m . . . . .  ___. . . . . . .  __. . . \n/\\ \\/\\ \\/\\. _`\\.  /'\\_/`\\. . /\\. _`\\ /\\_ \\.\x1b[0m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[0m \x1b[0m. . . .  /\\_ \\.  __. . . . /\\ \\__.  \n\\ \\ `\\\\ \\ \\ \\/\\_\\/\\. . . \\.  \\ \\ \\L\x1b[0m\\\x1b[0m\x1b[0m \x1b[0m\x1b[31m\\\x1b[0m\x1b[31m/\x1b[0m\x1b[31m/\x1b[0m\x1b[31m\\\x1b[0m \x1b[0m\\\x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[0m.\x1b[0m\x1b[0m \x1b[0m\x1b[31m_\x1b[0m\x1b[31m_\x1b[0m\x1b[31m.\x1b[0m . __. __\\//\\ \\ /\\_\\. . ___\\ \\ ,_\\. \n \\ \\ , ` \\ \\ \\/_/\\ \\ \\__\\ \\.  \\ \\\x1b[0m \x1b[0m\x1b[31m,\x1b[0m\x1b[31m_\x1b[0m\x1b[31m_\x1b[0m\x1b[31m/\x1b[0m\x1b[31m \x1b[0m\x1b[31m\\\x1b[0m\x1b[0m \x1b[0m\\ \x1b[31m\\\x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[0m \x1b[0m/'__`\\ /\\ \\/\\ \\ \\ \\ \\\\/\\ \\. /',__\\ \\ \\/. \n. \\ \\ \\`\\ \\ \\ \\L\\ \\ \\ \\_/\\ \\.  \\\x1b[0m \x1b[0m\x1b[31m\\\x1b[0m\x1b[31m \x1b[0m\x1b[31m\\\x1b[0m\x1b[31m/\x1b[0m\x1b[0m.\x1b[0m  \\\x1b[0m_\x1b[0m\x1b[0m\\\x1b[0m\x1b[31m \x1b[0m\x1b[31m\\\x1b[0m\x1b[31m_\x1b[0m\x1b[31m/\x1b[0m\x1b[31m\\\x1b[0m\x1b[31m \x1b[0m\x1b[0m\\\x1b[0m\x1b[0mL\x1b[0m\\.\\\\ \\ \\_\\ \\ \\_\\ \\\\ \\ \\/\\__, `\\ \\ \\_ \n.  \\ \\_\\ \\_\\ \\____/\\ \\_\\\\ \\_\\. \x1b[31m \x1b[0m\x1b[31m\\\x1b[0m\x1b[31m \x1b[0m\x1b[31m\\\x1b[0m\x1b[0m_\x1b[0m\\. \x1b[0m \x1b[0m\x1b[31m/\x1b[0m\x1b[31m\\\x1b[0m\x1b[31m_\x1b[0m\x1b[31m_\x1b[0m\x1b[31m_\x1b[0m\x1b[31m_\x1b[0m\x1b[31m\\\x1b[0m\x1b[31m \x1b[0m\x1b[31m\\\x1b[0m\x1b[31m_\x1b[0m\x1b[31m_\x1b[0m\x1b[31m/\x1b[0m\x1b[0m.\x1b[0m\\_\\/`____ \\/\\____\\ \\_\\/\\____/\\ \\__\\\n. . \\/_/\\/_/\\/___/. \\/_/ \\/_/.\x1b[0m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m\\\x1b[0m/_/.\x1b[31m \x1b[0m\x1b[31m \x1b[0m\x1b[31m\\\x1b[0m\x1b[31m/\x1b[0m\x1b[31m_\x1b[0m\x1b[0m_\x1b[0m\x1b[31m_\x1b[0m\x1b[31m_\x1b[0m\x1b[31m/\x1b[0m\x1b[31m\\\x1b[0m\x1b[0m/\x1b[0m\x1b[0m_\x1b[0m\x1b[31m_\x1b[0m\x1b[31m/\x1b[0m\x1b[31m\\\x1b[0m\x1b[31m/\x1b[0m\x1b[0m_\x1b[0m/`/___/> \\/____/\\/_/\\/___/. \\/__/\n. . . . . . . . . . . . . . . \x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[0m \x1b[0m. .\x1b[0m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[0m \x1b[0m. \x1b[0m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[0m.\x1b[0m .\x1b[0m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[0m \x1b[0m.  /\\___/. . . . . . . . . . .  \n. . . . . . . . . . . . . . .\x1b[0m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[0m \x1b[0m. .\x1b[0m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[0m \x1b[0m. .\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m . \x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m.  \\/__/. . . . . . . . . . . . \n ____. . . . . . . . . . . . .\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[0m.\x1b[0m ___\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[0m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[0m.\x1b[0m . \x1b[0m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m. .  __. . . . . . . . . . . .  \n/\\. _`\\. . . . . . . . . . . .\x1b[0m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m \x1b[0m\x1b[0m/\x1b[0m\\_ \\\x1b[0m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[0m.\x1b[0m . .\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m .  /\\ \\. . . . . . . . . . . . \n\\ \\ \\/\\ \\.  ___.  __. __. __.  \x1b[31m_\x1b[0m\x1b[31m_\x1b[0m\x1b[31m_\x1b[0m\x1b[31m\\\x1b[0m\x1b[0m/\x1b[0m/\\ \\.\x1b[0m \x1b[0m\x1b[0m.\x1b[0m\x1b[0m \x1b[0m\x1b[0m \x1b[0m___. .\x1b[35m \x1b[0m\x1b[31m \x1b[0m\x1b[31m_\x1b[0m\x1b[31m_\x1b[0m\x1b[0m.\x1b[0m .  \\_\\ \\. .  __. _ __. . . . . \n \\ \\ \\ \\ \\ / __`\\/\\ \\/\\ \\/\\ \\/' \x1b[0m_\x1b[0m\x1b[31m \x1b[0m\x1b[31m`\x1b[0m\x1b[31m\\\x1b[0m\x1b[31m\\\x1b[0m\x1b[0m \x1b[0m\\ \\.  / __\x1b[0m`\x1b[0m\x1b[0m\\\x1b[0m\x1b[31m \x1b[0m\x1b[31m/\x1b[0m\x1b[31m'\x1b[0m\x1b[31m_\x1b[0m\x1b[0m_\x1b[0m`\\.  /'_` \\. /'__`/\\`'__\\. . . . \n. \\ \\ \\_\\ /\\ \\L\\ \\ \\ \\_/ \\_/ /\\ \\\x1b[0m/\x1b[0m\x1b[31m\\\x1b[0m\x1b[31m \x1b[0m\x1b[31m\\\x1b[0m\x1b[31m\\\x1b[0m\x1b[31m_\x1b[0m\x1b[31m\\\x1b[0m\x1b[31m \x1b[0m\x1b[0m\\\x1b[0m\x1b[0m_\x1b[0m\x1b[0m/\x1b[0m\x1b[0m\\\x1b[0m\x1b[0m \x1b[0m\x1b[31m\\\x1b[0m\x1b[31mL\x1b[0m\x1b[31m\\\x1b[0m\x1b[31m \x1b[0m\x1b[31m/\x1b[0m\x1b[31m\\\x1b[0m\x1b[0m \x1b[0m\\L\\.\\_/\\ \\L\\ \\/\\. __\\ \\ \\/. . . .  \n.  \\ \\____\\ \\____/\\ \\___x___/\\ \\_\\ \\\x1b[0m_\x1b[0m\x1b[31m/\x1b[0m\x1b[31m\\\x1b[0m\x1b[31m_\x1b[0m\x1b[31m_\x1b[0m\x1b[31m_\x1b[0m\x1b[31m_\x1b[0m\x1b[31m\\\x1b[0m\x1b[31m \x1b[0m\x1b[31m\\\x1b[0m\x1b[31m_\x1b[0m\x1b[31m_\x1b[0m\x1b[31m_\x1b[0m\x1b[0m_\x1b[0m\x1b[0m\\\x1b[0m \\__/.\\_\\ \\___,_\\ \\____\\ \\_\\. . . .  \n. . \\/___/ \\/___/. \\/__//__/. \\/_/\\/_\\/_\x1b[0m_\x1b[0m\x1b[0m_\x1b[0m\x1b[0m_\x1b[0m\x1b[0m/\x1b[0m\x1b[0m\\\x1b[0m\x1b[0m/\x1b[0m\x1b[0m_\x1b[0m__/ \\/__/\\/_/\\/__,_ /\\/____/\\/_/. . . .  \n\n\n                                                  Netease Cloud Music Playlist Downloader")
+            print(" __. __. ____. . . . . . . .  ____. . ___. . \x1b[0m.\x1b[0m\x1b[0m \x1b[0m\x1b[0m.\x1b[0m\x1b[0m \x1b[0m\x1b[0m.\x1b[0m . . . . .  ___. . . . . . .  __. . . \n/\\ \\/\\ \\/\\. _`\\.  /'\\_/`\\. . /\\. _`\\ /\\_ \\.\x1b[0m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[0m \x1b[0m. . . .  /\\_ \\.  __. . . . /\\ \\__.  \n\\ \\ `\\\\ \\ \\ \\/\\_\\/\\. . . \\.  \\ \\ \\L\x1b[0m\\\x1b[0m\x1b[0m \x1b[0m\x1b[31m\\\x1b[0m\x1b[31m/\x1b[0m\x1b[31m/\x1b[0m\x1b[31m\\\x1b[0m \x1b[0m\\\x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[0m.\x1b[0m\x1b[0m \x1b[0m\x1b[31m_\x1b[0m\x1b[31m_\x1b[0m\x1b[31m.\x1b[0m . __. __\\//\\ \\ /\\_\\. . ___\\ \\ ,_\\. \n \\ \\ , ` \\ \\ \\/_/\\ \\ \\__\\ \\.  \\ \\\x1b[0m \x1b[0m\x1b[31m,\x1b[0m\x1b[31m_\x1b[0m\x1b[31m_\x1b[0m\x1b[31m/\x1b[0m\x1b[31m \x1b[0m\x1b[31m\\\x1b[0m\x1b[0m \x1b[0m\\ \x1b[31m\\\x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[0m \x1b[0m/'__`\\ /\\ \\/\\ \\ \\ \\ \\\\/\\ \\. /',__\\ \\ \\/. \n. \\ \\ \\`\\ \\ \\ \\L\\ \\ \\ \\_/\\ \\.  \\\x1b[0m \x1b[0m\x1b[31m\\\x1b[0m\x1b[31m \x1b[0m\x1b[31m\\\x1b[0m\x1b[31m/\x1b[0m\x1b[0m.\x1b[0m  \\\x1b[0m_\x1b[0m\x1b[0m\\\x1b[0m\x1b[31m \x1b[0m\x1b[31m\\\x1b[0m\x1b[31m_\x1b[0m\x1b[31m/\x1b[0m\x1b[31m\\\x1b[0m\x1b[31m \x1b[0m\x1b[0m\\\x1b[0m\x1b[0mL\x1b[0m\\.\\\\ \\ \\_\\ \\ \\_\\ \\\\ \\ \\/\\__, `\\ \\ \\_ \n.  \\ \\_\\ \\_\\ \\____/\\ \\_\\\\ \\_\\. \x1b[31m \x1b[0m\x1b[31m\\\x1b[0m\x1b[31m \x1b[0m\x1b[31m\\\x1b[0m\x1b[0m_\x1b[0m\\. \x1b[0m \x1b[0m\x1b[31m/\x1b[0m\x1b[31m\\\x1b[0m\x1b[31m_\x1b[0m\x1b[31m_\x1b[0m\x1b[31m_\x1b[0m\x1b[31m_\x1b[0m\x1b[31m\\\x1b[0m\x1b[31m \x1b[0m\x1b[31m\\\x1b[0m\x1b[31m_\x1b[0m\x1b[31m_\x1b[0m\x1b[31m/\x1b[0m\x1b[0m.\x1b[0m\\_\\/`____ \\/\\____\\ \\_\\/\\____/\\ \\__\\\n. . \\/_/\\/_/\\/___/. \\/_/ \\/_/.\x1b[0m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m\\\x1b[0m/_/.\x1b[31m \x1b[0m\x1b[31m \x1b[0m\x1b[31m\\\x1b[0m\x1b[31m/\x1b[0m\x1b[31m_\x1b[0m\x1b[0m_\x1b[0m\x1b[31m_\x1b[0m\x1b[31m_\x1b[0m\x1b[31m/\x1b[0m\x1b[31m\\\x1b[0m\x1b[0m/\x1b[0m\x1b[0m_\x1b[0m\x1b[31m_\x1b[0m\x1b[31m/\x1b[0m\x1b[31m\\\x1b[0m\x1b[31m/\x1b[0m\x1b[0m_\x1b[0m/`/___/> \\/____/\\/_/\\/___/. \\/__/\n. . . . . . . . . . . . . . . \x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[0m \x1b[0m. .\x1b[0m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[0m \x1b[0m. \x1b[0m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[0m.\x1b[0m .\x1b[0m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[0m \x1b[0m.  /\\___/. . . . . . . . . . .  \n. . . . . . . . . . . . . . .\x1b[0m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[0m \x1b[0m. .\x1b[0m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[0m \x1b[0m. .\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m . \x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m.  \\/__/. . . . . . . . . . . . \n ____. . . . . . . . . . . . .\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[0m.\x1b[0m ___\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[0m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[0m.\x1b[0m . \x1b[0m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m. .  __. . . . . . . . . . . .  \n/\\. _`\\. . . . . . . . . . . .\x1b[0m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m \x1b[0m\x1b[0m/\x1b[0m\\_ \\\x1b[0m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[0m.\x1b[0m . .\x1b[31m \x1b[0m\x1b[31m.\x1b[0m\x1b[31m \x1b[0m\x1b[31m.\x1b[0m .  /\\ \\. . . . . . . . . . . . \n\\ \\ \\/\\ \\.  ___.  __. __. __.  \x1b[31m_\x1b[0m\x1b[31m_\x1b[0m\x1b[31m_\x1b[0m\x1b[31m\\\x1b[0m\x1b[0m/\x1b[0m/\\ \\.\x1b[0m \x1b[0m\x1b[0m.\x1b[0m\x1b[0m \x1b[0m\x1b[0m \x1b[0m___. .\x1b[35m \x1b[0m\x1b[31m \x1b[0m\x1b[31m_\x1b[0m\x1b[31m_\x1b[0m\x1b[0m.\x1b[0m .  \\_\\ \\. .  __. _ __. . . . . \n \\ \\ \\ \\ \\ / __`\\/\\ \\/\\ \\/\\ \\/' \x1b[0m_\x1b[0m\x1b[31m \x1b[0m\x1b[31m`\x1b[0m\x1b[31m\\\x1b[0m\x1b[31m\\\x1b[0m\x1b[0m \x1b[0m\\ \\.  / __\x1b[0m`\x1b[0m\x1b[0m\\\x1b[0m\x1b[31m \x1b[0m\x1b[31m/\x1b[0m\x1b[31m'\x1b[0m\x1b[31m_\x1b[0m\x1b[0m_\x1b[0m`\\.  /'_` \\. /'__`/\\`'__\\. . . . \n. \\ \\ \\_\\ /\\ \\L\\ \\ \\ \\_/ \\_/ /\\ \\\x1b[0m/\x1b[0m\x1b[31m\\\x1b[0m\x1b[31m \x1b[0m\x1b[31m\\\x1b[0m\x1b[31m\\\x1b[0m\x1b[31m_\x1b[0m\x1b[31m\\\x1b[0m\x1b[31m \x1b[0m\x1b[0m\\\x1b[0m\x1b[0m_\x1b[0m\x1b[0m/\x1b[0m\x1b[0m\\\x1b[0m\x1b[0m \x1b[0m\x1b[31m\\\x1b[0m\x1b[31mL\x1b[0m\x1b[31m\\\x1b[0m\x1b[31m \x1b[0m\x1b[31m/\x1b[0m\x1b[31m\\\x1b[0m\x1b[0m \x1b[0m\\L\\.\\_/\\ \\L\\ \\/\\. __\\ \\ \\/. . . .  \n.  \\ \\____\\ \\____/\\ \\___x___/\\ \\_\\ \\\x1b[0m_\x1b[0m\x1b[31m/\x1b[0m\x1b[31m\\\x1b[0m\x1b[31m_\x1b[0m\x1b[31m_\x1b[0m\x1b[31m_\x1b[0m\x1b[31m_\x1b[0m\x1b[31m\\\x1b[0m\x1b[31m \x1b[0m\x1b[31m\\\x1b[0m\x1b[31m_\x1b[0m\x1b[31m_\x1b[0m\x1b[31m_\x1b[0m\x1b[0m_\x1b[0m\x1b[0m\\\x1b[0m \\__/.\\_\\ \\___,_\\ \\____\\ \\_\\. . . .  \n. . \\/___/ \\/___/. \\/__//__/. \\/_/\\/_\\/_\x1b[0m_\x1b[0m\x1b[0m_\x1b[0m\x1b[0m_\x1b[0m\x1b[0m/\x1b[0m\x1b[0m\\\x1b[0m\x1b[0m/\x1b[0m\x1b[0m_\x1b[0m__/ \\/__/\\/_/\\/__,_ /\\/____/\\/_/. . . .  \n\n\n"+" "*49+"Netease Cloud Music Playlist Downloader")
         else:
             print('\n\nNetease Cloud Music Playlist Downloader')
             print('\x1b[33m! 您的终端窗口宽度小于88个字符，部分特性已被停用。\x1b[0m')
@@ -1483,9 +1727,10 @@ if __name__ == '__main__':
             print('> 音质 选项')
             print('\x1b[94mi 有关于音质选项的详细说明，请参阅 https://github.com/padoru233/NCM-Playlist-Downloader/blob/main/README.md#音质说明\x1b[0m')
             print('可使用的音质选项：')
-            opts = [('standard', '标准 MP3 128kbps'), ('exhigh', '极高 MP3 320kbps'), ('lossless', '无损 FLAC 48kHz/16bit'), ('hires', '高解析度无损 FLAC 192kHz/16bit'), ('jymaster', '高清臻音 FLAC 96kHz/24bit')]
+            opts = [('standard', '标准\t  MP3\t  128kbps'), ('exhigh', '极高\t  MP3\t  320kbps'), ('lossless', '无损\t  FLAC\t  48kHz/16bit'), ('hires', '高解析度\tFLAC\t192kHz/16bit'), ('jymaster', '高清臻音\tFLAC\t96kHz/24bit')]
             for i, (val, zh) in enumerate(opts, 1):
                 flag = '\x1b[44m' if config['level'] == val else ''
+                zh = zh.expandtabs(8)
                 print(f'\x1b[36m[{i}]\x1b[0m {flag}{zh} ({val})\x1b[0m ')
             print('\n\x1b[36m[0]\x1b[0m 取消')
             sel = input('\x1b[36m> \x1b[0m').strip()
@@ -1494,23 +1739,23 @@ if __name__ == '__main__':
                 config['level'] = mapping[sel]
 
         def choose_lyrics():
-            print('\x1b[2m\n' + '=' * (terminal_width//2) + '\x1b[0m')
+            print('\x1b[2m' + '=' * (terminal_width//2) + '\x1b[0m')
             print('> 歌词 选项')
             print('保存歌词的方式：')
-            print('\x1b[36m[1]\x1b[0m 写入标签和文件')
-            print('\x1b[36m[2]\x1b[0m 只写入标签')
-            print('\x1b[36m[3]\x1b[0m 只写入lrc文件')
-            print('\x1b[36m[4]\x1b[0m 不处理歌词')
+            opts = [
+                ('both', '写入标签和文件'),
+                ('metadata', '只写入标签'),
+                ('lrc', '只写入lrc文件'),
+                ('none', '不处理歌词'),
+            ]
+            for i, (val, zh) in enumerate(opts, 1):
+                flag = '\x1b[44m' if config.get('lyrics_option') == val else ''
+                print(f"\x1b[36m[{i}]\x1b[0m {flag}{zh} ({val})\x1b[0m ")
             print('\n\x1b[36m[0]\x1b[0m 取消')
             sel = input('\x1b[36m> \x1b[0m').strip()
-            if sel == '1':
-                config['lyrics_option'] = 'both'
-            elif sel == '2':
-                config['lyrics_option'] = 'metadata'
-            elif sel == '3':
-                config['lyrics_option'] = 'lrc'
-            elif sel == '4':
-                config['lyrics_option'] = 'none'
+            mapping = {str(i): v for i, (v, _) in enumerate(opts, 1)}
+            if sel in mapping:
+                config['lyrics_option'] = mapping[sel]
 
         def refresh_preview():
             try:
@@ -1646,15 +1891,38 @@ if __name__ == '__main__':
                 else:
                     get_track_info(selected_id, config['level'], config['download_path'])
                 print('\x1b[?25h', end='')
-                break
+                print('\n\x1b[32m✓ 下载任务已完成！\x1b[0m')
+                with suppress(Exception):
+                    send_notification('下载已完成！', f'歌曲已保存到 {config.get("download_path", "downloads")}')
+                
+                continue_prompt = input('\x1b[33m  按回车键返回主菜单，按\x1b[31m Ctrl + C \x1b[33m退出程序。\x1b[0m')
             else:
                 pass
     except KeyboardInterrupt:
         print('\x1b[?25h', end='')
         print('\n\n\x1b[33m× 操作已被用户取消（按下了Ctrl + C组合键）。\x1b[0m')
+        
     except Exception as e:
         print(f'\x1b[31m× 出现全局错误: {e}\x1b[0m')
         print('  请报告给开发者以便修复。')
     finally:
         print('\x1b[?25h', end='')
-        input('\x1b[33m  按回车键退出...\x1b[0m')
+        try:
+            resp = input('\x1b[33m  按回车键退出，按\x1b[31m 9 \x1b[33m并回车删除已保存会话文件并退出：\x1b[0m').strip()
+            if resp == '9':
+                removed = []
+                for fn in ('session.json', 'session2.json'):
+                    with suppress(Exception):
+                        if os.path.exists(fn):
+                            os.remove(fn)
+                            removed.append(fn)
+                if removed:
+                    print('\x1b[32m✓ 已删除会话文件：' + ', '.join(removed) + '\x1b[0m')
+                else:
+                    print('\x1b[33m! 未找到任何会话文件可删除。\x1b[0m')
+        except Exception as e:
+            print(f'\x1b[31m! 退出时发生错误: {e}\x1b[0m')
+        finally:
+            # 保证光标可见
+            print('\x1b[?25h', end='')
+            

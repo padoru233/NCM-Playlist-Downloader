@@ -6,12 +6,5 @@ colorama
 mutagen
 Pillow
 selenium
+plyer
 webdriver-manager
-pytest
-qrcode
-requests
-pillow
-pyncm
-colorama
-mutagen
-

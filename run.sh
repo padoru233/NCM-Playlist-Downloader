@@ -1,235 +1,190 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-# 判断脚本是否在终端中运行
-if [ ! -t 0 ]; then
-    # 如果不是在终端中运行（比如双击），则使用终端模拟器重新运行此脚本
-    if command -v x-terminal-emulator &> /dev/null; then
-        # Debian/Ubuntu 系统
-        exec x-terminal-emulator -e "$0" "$@"
-    elif command -v gnome-terminal &> /dev/null; then
-        # GNOME 桌面环境
-        exec gnome-terminal -- "$0" "$@"
-    elif command -v konsole &> /dev/null; then
-        # KDE 桌面环境
-        exec konsole -e "$0" "$@"
-    elif command -v xfce4-terminal &> /dev/null; then
-        # XFCE 桌面环境
-        exec xfce4-terminal -e "$0" "$@"
-    elif command -v xterm &> /dev/null; then
-        # 几乎所有 X 系统都有 xterm
-        exec xterm -e "$0" "$@"
+# -------------------------------------------------------------
+# 您正在阅读此脚本的源代码。
+# 若要运行 Downloader，请右键此脚本选择“作为程序运行”
+# 或使用终端执行此脚本
+# sh ./run.sh
+# -------------------------------------------------------------
+
+
+set -euo pipefail
+
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$PROJECT_DIR"
+
+trap 'echo "发生错误，脚本终止" >&2; exit 1' ERR
+
+printf "\033]0;网易云音乐下载器\007" || true
+
+if [ ! -t 0 ] && [ -z "${CI:-}" ]; then
+    if [[ "${PREFIX:-}" == *com.termux* ]]; then
+        : # termux: ok
+    elif [[ "$OSTYPE" == darwin* ]] && command -v osascript >/dev/null 2>&1; then
+        osascript <<EOF
+tell application "Terminal"
+    activate
+    do script "cd '$PROJECT_DIR' && bash './run.sh'"
+end tell
+EOF
+        exit 0
     else
-        echo "找不到终端模拟器，请在终端中运行此脚本"
-        exit 1
+        if command -v x-terminal-emulator >/dev/null 2>&1; then
+            exec x-terminal-emulator -e "$0" "$@"
+        elif command -v gnome-terminal >/dev/null 2>&1; then
+            exec gnome-terminal -- "$0" "$@"
+        elif command -v konsole >/dev/null 2>&1; then
+            exec konsole -e "$0" "$@"
+        elif command -v xfce4-terminal >/dev/null 2>&1; then
+            exec xfce4-terminal -e "$0" "$@"
+        elif command -v xterm >/dev/null 2>&1; then
+            exec xterm -e "$0" "$@"
+        else
+            echo "找不到终端模拟器，请在终端中运行此脚本" >&2
+            exit 1
+        fi
     fi
 fi
+        VENV_CREATED=false
 
-set -e
-trap 'echo "发生错误，脚本终止"; exit 1' ERR
-echo -e "\033]0;网易云批量下载器\007"
+        try_install_python() {
+            echo "尝试自动安装 Python（若可行）..."
+            # Termux
+            if [[ "${PREFIX:-}" == *com.termux* ]] && command -v pkg >/dev/null 2>&1; then
+                pkg install -y python || true
+                return
+            fi
 
-# 添加标志跟踪系统包是否已安装
-SYSTEM_PACKAGES_INSTALLED=false
+            # macOS with brew
+            if [[ "$OSTYPE" == darwin* ]] && command -v brew >/dev/null 2>&1; then
+                brew install python || true
+                return
+            fi
 
-PKG_MANAGER=""
-if command -v apt-get &> /dev/null; then
-    PKG_MANAGER="apt"
-elif command -v dnf &> /dev/null; then
-    PKG_MANAGER="dnf"
-elif command -v yum &> /dev/null; then
-    PKG_MANAGER="yum"
-elif command -v pacman &> /dev/null; then
-    PKG_MANAGER="pacman"
-elif command -v zypper &> /dev/null; then
-    PKG_MANAGER="zypper"
-else
-    echo "警告: 无法识别的包管理器，请手动安装 Python 3 和 python3-venv"
-    if ! command -v python3 &> /dev/null; then
-        echo "错误: 找不到 python3 命令，请先安装 Python 3"
+            # Linux - try common package managers with sudo if available
+            SUDO=""
+            if command -v sudo >/dev/null 2>&1; then
+                SUDO="sudo"
+            fi
+            if command -v apt >/dev/null 2>&1 || command -v apt-get >/dev/null 2>&1; then
+                ${SUDO} apt-get update || true
+                ${SUDO} apt-get install -y python3 python3-venv python3-pip || true
+                return
+            fi
+            if command -v dnf >/dev/null 2>&1; then
+                ${SUDO} dnf install -y python3 python3-venv python3-pip || true
+                return
+            fi
+            if command -v pacman >/dev/null 2>&1; then
+                ${SUDO} pacman -Syu --noconfirm python python-virtualenv || true
+                return
+            fi
+            if command -v zypper >/dev/null 2>&1; then
+                ${SUDO} zypper install -y python3 python3-venv python3-pip || true
+                return
+            fi
+            if command -v apk >/dev/null 2>&1; then
+                ${SUDO} apk add --no-cache python3 py3-virtualenv python3-dev || true
+                return
+            fi
+            echo "未检测到可用的包管理器或权限不足，无法自动安装 Python。请参考 README 手动安装。" >&2
+        }
+
+# 选择 Python 解释器（优先 python3）
+PYTHON=""
+for cmd in python3 python; do
+    if command -v "$cmd" >/dev/null 2>&1; then
+        PYTHON="$cmd"
+        break
+    fi
+done
+
+if [ -z "$PYTHON" ]; then
+    echo "未找到 Python，请先安装 Python 3。" >&2
+    if [[ "$OSTYPE" == darwin* ]]; then
+    # 再次检测
+    for cmd in python3 python; do
+        if command -v "$cmd" >/dev/null 2>&1; then
+            PYTHON="$cmd"
+            break
+        fi
+    done
+    if [ -z "$PYTHON" ]; then
+        echo "仍未找到 Python，请手动安装 Python 3（示例：apt-get install python3 python3-venv 或 brew install python）。" >&2
         exit 1
     fi
+        echo "macOS 可使用: brew install python" >&2
+    fi
+    if [[ "${PREFIX:-}" == *com.termux* ]]; then
+        echo "Termux 可使用: pkg install python" >&2
+    fi
+    exit 1
 fi
 
-# 安装系统级 Python 包
-install_system_packages() {
-    # 如果已经安装过，则跳过
-    if [ "$SYSTEM_PACKAGES_INSTALLED" = true ]; then
-        echo "系统包已安装，跳过..."
-        return
+"$PYTHON" - <<'PY' || true
+import sys
+v = sys.version_info
+if v < (3,7):
+        print(f"警告：检测到 Python 版本 {v.major}.{v.minor}.{v.micro}，建议使用 3.7+。", flush=True)
+PY
+
+VENV_DIR="$PROJECT_DIR/venv"
+DEPS_INSTALLED=true
+VENV_CREATED=true
+if [ ! -d "$VENV_DIR" ]; then
+    echo "创建虚拟环境..."
+    if ! "$PYTHON" -m venv "$VENV_DIR" 2>/dev/null; then
+        echo "venv 模块不可用，尝试 ensurepip 修复..." >&2
+        "$PYTHON" -m ensurepip --upgrade >/dev/null 2>&1 || true
+        "$PYTHON" -m venv "$VENV_DIR"
     fi
-    
-    echo "尝试通过系统包管理器安装依赖..."
-    
-    case $PKG_MANAGER in
-        "apt")
-            echo "使用 apt 安装系统级 Python 包..."
-            sudo apt-get update
-            sudo apt-get install -y python3-requests python3-pillow python3-pip python3-qrcode python3-venv python3-full python3-colorama python3-mutagen python3-selenium
-            ;;
-        "dnf"|"yum")
-            echo "使用 ${PKG_MANAGER} 安装系统级 Python 包..."
-            sudo $PKG_MANAGER install -y python3-requests python3-pillow python3-pip python3-qrcode python3-colorama python3-mutagen python3-selenium
-            ;;
-        "pacman")
-            echo "使用 pacman 安装系统级 Python 包..."
-            sudo pacman -Sy python-requests python-pillow python-pip python-qrcode  python-colorama python-mutagen python-selenium 
-            ;;
-        "zypper")
-            echo "使用 zypper 安装系统级 Python 包..."
-            sudo zypper install -y python3-requests python3-Pillow python3-pip python3-qrcode python3-colorama python3-mutagen python3-selenium 
-            ;;
-        *)
-            echo "警告: 未知的包管理器，无法安装系统级 Python 包"
-            ;;
-    esac
-    
-    SYSTEM_PACKAGES_INSTALLED=true
+    DEPS_INSTALLED=false
+fi
+
+# 激活虚拟环境
+on_error() {
+  echo "脚本发生错误，进行清理..." >&2
+  # 如果 venv 存在则删除（按要求）
+  if [ -d "$VENV_DIR" ]; then
+    echo "删除虚拟环境 $VENV_DIR ..."
+    rm -rf "$VENV_DIR" || true
+  fi
+  cleanup
+  exit 1
 }
 
-echo "检查必要的依赖..."
+# 在 ERR 时删除 venv（用户要求）
+trap on_error ERR
+# shellcheck disable=SC1090
+source "$VENV_DIR/bin/activate"
 
-# 1. 首先检查Python和pip是否安装
-if ! command -v python3 &> /dev/null; then
-    echo "未检测到 Python 3，尝试安装..."
-    case $PKG_MANAGER in
-        "apt")
-            sudo apt-get update
-            sudo apt-get install -y python3 python3-pip
-            ;;
-        "dnf")
-            sudo dnf install -y python3 python3-pip
-            ;;
-        "yum")
-            sudo yum install -y python3 python3-pip
-            ;;
-        "pacman")
-            sudo pacman -Sy python python-pip
-            ;;
-        "zypper")
-            sudo zypper install -y python3 python3-pip
-            ;;
-    esac
+# 退出时确保退出 venv（不因错误而中断）
+cleanup() {
+    deactivate 2>/dev/null || true
+}
+trap cleanup EXIT
+
+# 检查 pip 是否可用
+if ! "$PYTHON" -m pip --version >/dev/null 2>&1; then
+    echo "pip 未安装，将进行安装..."
+    DEPS_INSTALLED=false
+    "$PYTHON" -m ensurepip --upgrade >/dev/null 2>&1 || true
 fi
 
-# 2. 检查是否支持venv
-VENV_SUPPORTED=true
-if ! python3 -c "import venv" &> /dev/null; then
-    echo "未检测到 venv 模块，尝试安装..."
-    case $PKG_MANAGER in
-        "apt")
-            sudo apt-get install -y python3-venv python3-full || VENV_SUPPORTED=false
-            ;;
-        "dnf")
-            sudo dnf install -y python3-venv || VENV_SUPPORTED=false
-            ;;
-        "yum")
-            sudo yum install -y python3-venv || VENV_SUPPORTED=false
-            ;;
-        "pacman")
-            sudo pacman -Sy python-virtualenv || VENV_SUPPORTED=false
-            ;;
-        "zypper")
-            sudo zypper install -y python3-virtualenv || VENV_SUPPORTED=false
-            ;;
-        *)
-            VENV_SUPPORTED=false
-            ;;
-    esac
-    
-    # 再次检查venv是否可用
-    if ! python3 -c "import venv" &> /dev/null; then
-        VENV_SUPPORTED=false
-    fi
-fi
-
-# 3. 如果支持venv，优先使用虚拟环境
-if [ "$VENV_SUPPORTED" = true ]; then
-    VENV_DIR="venv"
-    if [ ! -d "$VENV_DIR" ]; then
-        echo "创建虚拟环境，这可能需要一段时间，并且只需要执行一次..."
-        # 修复虚拟环境创建命令
-        python3 -m venv "$VENV_DIR" || {
-            echo "虚拟环境创建失败，尝试使用系统 Python..."
-            VENV_SUPPORTED=false
-        }
+# 首次或修复后安装依赖（使用清华源，与 run.bat 一致）
+if [ "$DEPS_INSTALLED" = false ]; then
+    echo "安装依赖，这可能需要一段时间..."
+    "$PYTHON" -m pip install --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple/
+    if [ -f requirements.txt ]; then
+        "$PYTHON" -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple/
     fi
 
-    if [ -f "$VENV_DIR/bin/activate" ] && [ "$VENV_SUPPORTED" = true ]; then
-        echo "激活虚拟环境..."
-        source "$VENV_DIR/bin/activate" || { 
-            echo "激活虚拟环境失败，使用系统 Python"; 
-            VENV_SUPPORTED=false
-        }
-        
-        if [ "$VENV_SUPPORTED" = true ]; then
-            # 在虚拟环境中安装依赖
-            echo "检查虚拟环境中的依赖..."
-            if ! python -c "import pyncm" > /dev/null 2>&1; then
-                echo "安装依赖..."
-                pip install -r requirements.txt 2>&1 || {
-                    echo "警告: 无法安装部分依赖，脚本可能无法正常运行"
-                }
-            fi
-            
-            echo "运行脚本..."
-            if [ -f "script.py" ]; then
-                clear
-                python script.py
-            else
-                echo "错误: script.py 文件不存在"
-                deactivate
-                exit 1
-            fi
-            
-            deactivate
-            echo "按回车键退出..."
-            read
-            exit 0
-        fi
-    else
-        echo "虚拟环境创建不完整，将使用系统Python继续..."
-        VENV_SUPPORTED=false
-    fi
+# 成功执行后，保持 venv（不删除）并正常退出
+else
+    echo "依赖检查完成..."
 fi
 
-# 4. 如果不支持venv或虚拟环境创建/激活失败，使用系统Python
-if [ "$VENV_SUPPORTED" = false ]; then
-    echo "将使用系统 Python..."
-    # 检查全局是否已安装必要的包
-    if ! python3 -c "import pyncm" > /dev/null 2>&1 || \
-       ! python3 -c "import requests" > /dev/null 2>&1 || \
-       ! python3 -c "import PIL" > /dev/null 2>&1 || \
-       ! python3 -c "import qrcode" > /dev/null 2>&1 || \
-       ! python3 -c "import mutagen" > /dev/null 2>&1; then
-        
-        echo "系统中缺少必要的Python包..."
-        # 先尝试使用pip安装
-        if pip install --user -r requirements.txt > /dev/null 2>&1; then
-            echo "已成功通过pip安装所需包"
-        else
-            echo "pip安装失败，尝试使用系统包管理器安装..."
-            install_system_packages
-            
-            # 再次尝试安装pyncm（因为系统包可能没有）
-            pip install --user pyncm mutagen selenium > /dev/null 2>&1 || {
-                echo "尝试系统级安装..."
-                pip install -r requirements.txt --break-system-packages || {
-                    echo "警告: 无法安装pyncm，脚本可能无法正常运行"
-                }
-            }
-        fi
-    fi
-    
-    echo "运行脚本（使用系统 Python）..."
-    if [ -f "script.py" ]; then
-        clear
-        python3 script.py
-    else
-        echo "错误: script.py 文件不存在"
-        exit 1
-    fi
-    
-    echo "按回车键退出..."
-    read
-    exit 0
-fi
+# 清屏后运行主脚本
+clear || true
+"$PYTHON" script.py
+
