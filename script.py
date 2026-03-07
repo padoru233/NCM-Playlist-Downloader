@@ -1,5 +1,5 @@
 import sys, os, json, qrcode, time, pyncm, requests, re, platform, subprocess, shutil # pyright: ignore[reportMissingModuleSource, reportMissingImports]
-from pyncm.apis import playlist, track, login # pyright: ignore[reportMissingImports]
+from pyncm.apis import playlist, track, album, login # pyright: ignore[reportMissingImports]
 import functools 
 import unicodedata
 import threading
@@ -990,6 +990,10 @@ def get_track_audio(song_ids, level, encode_type):
 def get_playlist_all_tracks(playlist_id):
     return playlist.GetPlaylistAllTracks(playlist_id)
 
+@retry_with_timeout(timeout=30, retry_times=2, operation_name='获取专辑信息')
+def get_album_info(album_id):
+    return album.GetAlbumInfo(album_id)
+
 def process_lyrics(track_id, track_name, artist_name, output_option, download_path, audio_file_path=None):
     try:
         lyric_data, error = get_track_lyrics(track_id)
@@ -1135,6 +1139,44 @@ def get_playlist_tracks_and_save_info(playlist_id, level, download_path):
         print(f'\x1b[32m✓ 操作已完成，歌曲已下载并保存到 \x1b[36m{download_path}\x1b[32m 文件夹中。\x1b[0m\x1b[K')
     except Exception as e:
         print(f'\x1b[31m× 获取歌单列表或下载歌曲时出错: {e}\x1b[0m\x1b[K')
+
+
+def get_album_tracks_and_save_info(album_id, level, download_path):
+    try:
+        info, error = get_album_info(album_id)
+        if error:
+            print(f'\x1b[31m× 获取专辑信息时出错: {error}\x1b[0m\x1b[K')
+            return
+        # album info may contain songs either at top-level 'songs' or under 'album'->'songs'
+        songs = None
+        if info and isinstance(info, dict):
+            if 'songs' in info:
+                songs = info['songs']
+            elif 'album' in info and isinstance(info['album'], dict) and 'songs' in info['album']:
+                songs = info['album']['songs']
+        if not songs:
+            print('\x1b[31m× 获取专辑信息返回无有效曲目列表\x1b[0m\x1b[K')
+            return
+        if not os.path.exists(download_path):
+            os.makedirs(download_path)
+        album_info_filename = os.path.join(download_path, f'!#_album_{album_id}_info.txt')
+        with open(album_info_filename, 'w', encoding='utf-8') as f:
+            for track_info in songs:
+                track_id = track_info['id']
+                track_name = track_info['name']
+                artist_name = ', '.join((artist.get('name') for artist in track_info.get('ar', [])))
+                f.write(f'{track_id} - {track_name} - {artist_name}\n')
+        print(f'\x1b[32m✓ \x1b[0m专辑信息已保存到 {album_info_filename}')
+        total_tracks = len(songs)
+        for index, track_info in enumerate(songs, start=1):
+            track_id = track_info['id']
+            track_name = track_info['name']
+            artist_name = ', '.join((artist.get('name') for artist in track_info.get('ar', [])))
+            download_and_save_track(track_id, track_name, artist_name, level, download_path, track_info, index, total_tracks)
+        print('=' * terminal_width + '\x1b[K')
+        print(f'\x1b[32m✓ 操作已完成，专辑歌曲已下载并保存到 \x1b[36m{download_path}\x1b[32m 文件夹中。\x1b[0m\x1b[K')
+    except Exception as e:
+        print(f'\x1b[31m× 获取专辑信息或下载歌曲时出错: {e}\x1b[0m\x1b[K')
 
 def get_track_info(track_id, level, download_path):
     try:
@@ -1633,8 +1675,8 @@ if __name__ == '__main__':
                 input('  按回车退出程序...')
                 sys.exit(1)
         default_path = os.path.join(os.getcwd(), 'downloads')
-        config = {'download_path': default_path, 'mode': 'playlist', 'playlist_id': None, 'track_id': None, 'level': 'exhigh', 'lyrics_option': 'both'}
-        preview_cache = {'playlist': {'id': None, 'name': None, 'count': None, 'error': None}, 'track': {'id': None, 'name': None, 'artist': None, 'error': None}}
+        config = {'download_path': default_path, 'mode': 'playlist', 'playlist_id': None, 'album_id': None, 'track_id': None, 'level': 'exhigh', 'lyrics_option': 'both'}
+        preview_cache = {'playlist': {'id': None, 'name': None, 'count': None, 'error': None}, 'track': {'id': None, 'name': None, 'artist': None, 'error': None}, 'album': {'id': None, 'name': None, 'count': None, 'error': None}}
 
         def color_text(text, color_code):
             return f'\x1b[{color_code}m{text}\x1b[0m'
@@ -1651,12 +1693,18 @@ if __name__ == '__main__':
                 config['download_path'] = normalize_path(ipt)
 
         def toggle_mode():
-            config['mode'] = 'track' if config['mode'] == 'playlist' else 'playlist'
+            # cycle through modes: playlist -> track -> album -> playlist
+            if config['mode'] == 'playlist':
+                config['mode'] = 'track'
+            elif config['mode'] == 'track':
+                config['mode'] = 'album'
+            else:
+                config['mode'] = 'playlist' 
 
         def input_id_for_mode():
             print('\n\x1b[2m' + '=' * (terminal_width//2) + '\x1b[0m')
             print('> 配置 ID')
-            print('\x1b[94mi 有关于歌单 ID 和单曲 ID 的说明，请参阅 https://github.com/padoru233/NCM-Playlist-Downloader/blob/main/README.md#使用方法\x1b[0m')
+            print('\x1b[94mi 有关于歌单、专辑和单曲 ID 的说明，请参阅 https://github.com/padoru233/NCM-Playlist-Downloader/blob/main/README.md#使用方法\x1b[0m')
 
             def extract_id_and_type(text: str):
                 if not text:
@@ -1668,7 +1716,10 @@ if __name__ == '__main__':
                 found_id = m.group(1) if m else None
                 lower = s.lower()
                 inferred = None
-                if re.search('(?:#|/)(?:.*)playlist', lower) or '/playlist' in lower:
+                # detect album links first, then playlist and track/song
+                if re.search('(?:#|/)(?:.*)album', lower) or '/album' in lower:
+                    inferred = 'album'
+                elif re.search('(?:#|/)(?:.*)playlist', lower) or '/playlist' in lower:
                     inferred = 'playlist'
                 elif re.search('(?:#|/)(?:.*)song', lower) or '/song' in lower or '/track' in lower:
                     inferred = 'track'
@@ -1678,7 +1729,12 @@ if __name__ == '__main__':
                 if m2:
                     return (m2.group(1), inferred)
                 return (None, None)
-            prompt = '  请输入歌单 ID\x1b[36m > \x1b[0m' if config['mode'] == 'playlist' else '  请输入单曲 ID\x1b[36m > \x1b[0m'
+            if config['mode'] == 'playlist':
+                prompt = '  请输入歌单 ID\x1b[36m > \x1b[0m'
+            elif config['mode'] == 'track':
+                prompt = '  请输入单曲 ID\x1b[36m > \x1b[0m'
+            else:
+                prompt = '  请输入专辑 ID\x1b[36m > \x1b[0m'
             ipt = input(prompt).strip()
             final_id = None
             final_type = None
@@ -1706,20 +1762,33 @@ if __name__ == '__main__':
                     final_type = config['mode']
                 if final_type == 'playlist':
                     if config['mode'] != 'playlist':
-                        print('\x1b[33m! 检测到歌单链接/ID，但当前为单曲模式，已自动切换到歌单模式。\x1b[0m')
+                        print('\x1b[33m! 检测到歌单链接/ID，已自动切换到歌单模式。\x1b[0m')
                         config['mode'] = 'playlist'
                     config['playlist_id'] = final_id
                     config['track_id'] = None
-                else:
+                    config['album_id'] = None
+                elif final_type == 'track':
                     if config['mode'] != 'track':
-                        print('\x1b[33m! 检测到单曲链接/ID，但当前为歌单模式，已自动切换到单曲模式。\x1b[0m')
+                        print('\x1b[33m! 检测到单曲链接/ID，已自动切换到单曲模式。\x1b[0m')
                         config['mode'] = 'track'
                     config['track_id'] = final_id
                     config['playlist_id'] = None
-            elif config['mode'] == 'playlist':
-                config['playlist_id'] = None
+                    config['album_id'] = None
+                else:
+                    if config['mode'] != 'album':
+                        print('\x1b[33m! 检测到专辑链接/ID，已自动切换到专辑模式。\x1b[0m')
+                        config['mode'] = 'album'
+                    config['album_id'] = final_id
+                    config['playlist_id'] = None
+                    config['track_id'] = None
             else:
-                config['track_id'] = None
+                # clear current id
+                if config['mode'] == 'playlist':
+                    config['playlist_id'] = None
+                elif config['mode'] == 'track':
+                    config['track_id'] = None
+                else:
+                    config['album_id'] = None
             refresh_preview()
 
         def choose_level():
@@ -1770,6 +1839,22 @@ if __name__ == '__main__':
                         name = song.get('name', '')
                         artist = ', '.join((a.get('name', '') for a in song.get('ar', [])))
                         preview_cache['track'] = {'id': config['track_id'], 'name': name, 'artist': artist, 'error': None} # pyright: ignore[reportArgumentType]
+                elif config['mode'] == 'album' and config['album_id']:
+                    if preview_cache['album']['id'] == config['album_id']:
+                        return
+                    info, err = get_album_info(config['album_id'])
+                    if DEBUG:
+                        print(f'调试信息：\x1b[90m{info}\x1b[0m')
+                        input('按回车键继续...')
+                    if err or not info:
+                        preview_cache['album'] = {'id': config['album_id'], 'name': None, 'count': None, 'error': str(err) if err else '无结果'} # type: ignore
+                    else:
+                        songs = info.get('songs') or (info.get('album', {}) or {}).get('songs') or []
+                        count = len(songs) if songs is not None else None
+                        first_song_name = songs[0].get('name') if songs else None
+                        # album title if available
+                        album_name = (info.get('album') or {}).get('name') or info.get('name') or first_song_name
+                        preview_cache['album'] = {'id': config['album_id'], 'name': album_name, 'count': count, 'error': None} # type: ignore
                 elif config['mode'] == 'playlist' and config['playlist_id']:
                     if preview_cache['playlist']['id'] == config['playlist_id']:
                         return
@@ -1787,6 +1872,8 @@ if __name__ == '__main__':
             except Exception as e:
                 if config['mode'] == 'track':
                     preview_cache['track'] = {'id': config.get('track_id'), 'name': None, 'artist': None, 'error': str(e)} # type: ignore # type: ignore
+                elif config['mode'] == 'album':
+                    preview_cache['album'] = {'id': config.get('album_id'), 'name': None, 'count': None, 'error': str(e)} # type: ignore
                 else:
                     preview_cache['playlist'] = {'id': config.get('playlist_id'), 'name': None, 'count': None, 'error': str(e)} # type: ignore
 
@@ -1810,10 +1897,19 @@ if __name__ == '__main__':
             unselected_color = '2;9'
             p_lbl = color_text('歌单', selected_color if config['mode'] == 'playlist' else unselected_color)
             t_lbl = color_text('单曲', selected_color if config['mode'] == 'track' else unselected_color)
-            id_val = config['playlist_id'] if config['mode'] == 'playlist' else config['track_id']
-            id_title = '歌单ID' if config['mode'] == 'playlist' else '单曲ID'
+            a_lbl = color_text('专辑', selected_color if config['mode'] == 'album' else unselected_color)
+            # choose id value/title based on current mode
+            if config['mode'] == 'playlist':
+                id_val = config['playlist_id']
+                id_title = '歌单ID'
+            elif config['mode'] == 'track':
+                id_val = config['track_id']
+                id_title = '单曲ID'
+            else:
+                id_val = config['album_id']
+                id_title = '专辑ID'
             id_show = id_val if id_val else color_text('\x1b[5m[未指定]\x1b[0m', '31')
-            print(f'\x1b[36m[1]\x1b[0m尝试下载 {p_lbl}{t_lbl}  \x1b[2m|\x1b[0m \x1b[36m[2]\x1b[0m{id_title}:\x1b[33m{id_show}\x1b[0m')
+            print(f'\x1b[36m[1]\x1b[0m尝试下载 {p_lbl}{a_lbl}{t_lbl}  \x1b[2m|\x1b[0m \x1b[36m[2]\x1b[0m{id_title}:\x1b[33m{id_show}\x1b[0m')
             print('\x1b[2m' + '-' * terminal_width + '\x1b[0m')
             if config['mode'] == 'track':
                 print('单曲详细信息: ' if config['track_id'] else '详细信息:')
@@ -1827,6 +1923,24 @@ if __name__ == '__main__':
                     ready_to_go = False
                 else:
                     print(color_text(f'请先按[2]，指定要下载的曲目ID！', '31;5'))
+                    print('')
+                    ready_to_go = False
+            elif config['mode'] == 'album':
+                print('专辑详细信息: ' if config['album_id'] else '详细信息: ')
+                if config['album_id'] and preview_cache['album']['id'] == config['album_id'] and (not preview_cache['album']['error']):
+                    if DEBUG:
+                        print(f"调试信息：\x1b[90m{preview_cache['album']}\x1b[0m")
+                    name = preview_cache['album'].get('name') or ''
+                    count = preview_cache['album'].get('count')
+                    print(f"曲目数：\x1b[36m{(count if count is not None else '')}\x1b[0m")
+                    print(f'专辑名：\x1b[36m{name}\x1b[0m')
+                    ready_to_go = True
+                elif config['album_id'] and preview_cache['album']['error']:
+                    print(color_text(f"获取专辑信息失败：{preview_cache['album']['error']}，无法下载！", '31;5'))
+                    print('')
+                    ready_to_go = False
+                else:
+                    print(color_text(f'请先按[2]，指定要下载的专辑ID！', '31;5'))
                     print('')
                     ready_to_go = False
             else:
@@ -1874,7 +1988,12 @@ if __name__ == '__main__':
             elif choice == '4':
                 choose_lyrics()
             elif choice == '9':
-                selected_id = config['playlist_id'] if config['mode'] == 'playlist' else config['track_id']
+                if config['mode'] == 'playlist':
+                    selected_id = config['playlist_id']
+                elif config['mode'] == 'track':
+                    selected_id = config['track_id']
+                else:
+                    selected_id = config['album_id']
                 if not selected_id:
                     print(color_text('× 未指定ID，请先通过[2]设置。', '31'))
                     time.sleep(2)
@@ -1888,6 +2007,8 @@ if __name__ == '__main__':
                 globals()['lyrics_option'] = config['lyrics_option']
                 if config['mode'] == 'playlist':
                     get_playlist_tracks_and_save_info(selected_id, config['level'], config['download_path'])
+                elif config['mode'] == 'album':
+                    get_album_tracks_and_save_info(selected_id, config['level'], config['download_path'])
                 else:
                     get_track_info(selected_id, config['level'], config['download_path'])
                 print('\x1b[?25h', end='')

@@ -69,6 +69,7 @@ chmod +x run.sh
   > 若提示 `8821` 错误，可能是由于您的账号存在异常登录行为，请尝试更换登录方式（如导入已有cookie或通过兼容平台获取凭据）或等待到次日再试。
 - 登录成功后，界面会提示你调整需要的选项。
 - 获取歌单 ID：在歌单页面选择“分享”，复制类似 https://music.163.com/m/playlist?id=12345678 的链接（链接中 playlist?id= 后面的数字就是歌单 ID），将其粘贴到程序中并按回车。
+- 获取专辑 ID：在专辑页面选择“分享”，复制类似 https://music.163.com/m/album?id=12345678 的链接（链接中 album?id= 后面的数字就是专辑 ID），将其粘贴到程序中并按回车。
 - 下载单曲：方式类似，获取单曲链接并粘贴（若只有ID则需要手动切换尝试下载）
 - 选择需要的音质和歌词处理方式等选项。
 - 确认显示信息无误后，输入数字 9 并按回车开始下载。
@@ -137,18 +138,6 @@ chmod +x run.sh
     - 通常一首歌大小50MB左右
     - 需要 VIP 账号
 
-- 高清臻音`jymaster` (Master VIP)
-    - flac格式 声音听感增强 96kHz/24bit
-    - 声道: 立体声 stereo
-    - 采样率: 96000 Hz
-    - 位每采样: 32
-    - 编解码器: FLAC (Free Lossless Audio Codec) (flac)
-    ```
-      Stream #0:0: Audio: flac, 96000 Hz, stereo, s32 (24 bit)
-    ```
-    - 通常一首歌大小150MB左右
-    - 需要 VIP 账号
-    - 
 - 高清臻音`jymaster` (Master VIP)
     - flac格式 声音听感增强 96kHz/24bit
     - 声道: 立体声 stereo

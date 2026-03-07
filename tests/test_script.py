@@ -15,6 +15,7 @@ sys.modules['pyncm'] = fake_pyncm
 
 fake_pyncm_apis = types.ModuleType('pyncm.apis')
 fake_pyncm_apis.playlist = types.SimpleNamespace(GetPlaylistAllTracks=lambda pid: ({'songs': []}, None))
+fake_pyncm_apis.album = types.SimpleNamespace(GetAlbumInfo=lambda aid: ({'album': {'songs': []}}, None))
 fake_pyncm_apis.track = types.SimpleNamespace(
     GetTrackLyrics=lambda tid: ({'lrc': {'lyric': ''}, 'tlyric': {'lyric': ''}}, None),
     GetTrackDetail=lambda ids: ({'songs': []}, None),
@@ -159,3 +160,10 @@ def test_parse_user_info_variants():
 def test_get_terminal_size_returns_tuple():
     cols, lines = script.get_terminal_size()
     assert isinstance(cols, int) and isinstance(lines, int)
+
+
+def test_get_album_info_wrapper():
+    # should return (data, None) when album API returns successfully
+    data, err = script.get_album_info('123')
+    assert err is None
+    assert isinstance(data, dict)
